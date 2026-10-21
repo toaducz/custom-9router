@@ -216,11 +216,11 @@ export default function CombosPage() {
     }
   };
 
-  const handleImportOpenRouter = async (url) => {
+  const handleImportOpenRouter = async (url, customName = "") => {
     const res = await fetch("/api/combos/import-openrouter", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url }),
+      body: JSON.stringify({ url: url || DEFAULT_OPENROUTER_URL, name: customName || undefined }),
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data.error || "Failed to import combo");
@@ -1031,21 +1031,29 @@ function ModelItem({ id, index, model, isFirst, isLast, onEdit, onMoveUp, onMove
   );
 }
 
+const DEFAULT_OPENROUTER_URL =
+  "https://openrouter.ai/models?max_price=0&input_modalities=text&order=coding-high-to-low";
+
 function OpenRouterImportModal({ isOpen, onClose, onImport }) {
-  const [url, setUrl] = useState("");
+  const [url, setUrl] = useState(DEFAULT_OPENROUTER_URL);
+  const [customName, setCustomName] = useState("");
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
 
-  const handleImport = async () => {
-    if (!url.trim()) {
-      setError("URL is required");
-      return;
+  useEffect(() => {
+    if (isOpen) {
+      setUrl(DEFAULT_OPENROUTER_URL);
+      setCustomName("");
+      setError("");
     }
+  }, [isOpen]);
+
+  const handleImport = async () => {
     setSaving(true);
     setError("");
     try {
-      await onImport(url.trim());
-      setUrl("");
+      const targetUrl = url.trim() || DEFAULT_OPENROUTER_URL;
+      await onImport(targetUrl, customName.trim());
     } catch (e) {
       setError(e?.message || "Failed to import combo");
     } finally {
@@ -1053,26 +1061,52 @@ function OpenRouterImportModal({ isOpen, onClose, onImport }) {
     }
   };
 
+  const isDefaultUrl = url.trim() === DEFAULT_OPENROUTER_URL;
+
   return (
     <Modal isOpen={isOpen} onClose={onClose} title="Import OpenRouter URL">
       <div className="flex flex-col gap-3">
-        <Input
-          label="OpenRouter models URL"
-          value={url}
-          onChange={(e) => { setUrl(e.target.value); if (error) setError(""); }}
-          placeholder="https://openrouter.ai/models?max_price=0&output_modalities=text"
-          error={error}
-        />
-        <p className="text-[11px] text-text-muted">
-          Pastes a openrouter.ai/models link. Only its max_price / output_modalities
-          filters are applied; the catalog is fetched server-side and saved as
-          openrouter-{"{timestamp}"}.
-        </p>
+        <div>
+          <div className="flex items-center justify-between mb-1">
+            <label className="text-sm font-medium">OpenRouter models URL</label>
+            {!isDefaultUrl && (
+              <button
+                type="button"
+                onClick={() => setUrl(DEFAULT_OPENROUTER_URL)}
+                className="cursor-pointer text-[11px] text-primary hover:underline hover:opacity-85 transition-colors duration-200"
+              >
+                Reset default URL
+              </button>
+            )}
+          </div>
+          <Input
+            value={url}
+            onChange={(e) => { setUrl(e.target.value); if (error) setError(""); }}
+            placeholder={DEFAULT_OPENROUTER_URL}
+            error={error}
+          />
+          <p className="text-[11px] text-text-muted mt-1">
+            Defaults to free text models ranked by coding score. You can paste any openrouter.ai/models link here to filter and import.
+          </p>
+        </div>
+
+        <div>
+          <Input
+            label="Combo Name (optional)"
+            value={customName}
+            onChange={(e) => setCustomName(e.target.value)}
+            placeholder="Auto-generated (e.g. openrouter-YYYY-MM-DD)"
+          />
+          <p className="text-[10px] text-text-muted mt-0.5">
+            Leave blank to automatically use date format (openrouter-YYYY-MM-DD).
+          </p>
+        </div>
+
         <div className="flex flex-col gap-2 pt-1 sm:flex-row">
-          <Button onClick={onClose} variant="ghost" fullWidth size="sm">
+          <Button onClick={onClose} variant="ghost" fullWidth size="sm" className="cursor-pointer transition-colors duration-200">
             Cancel
           </Button>
-          <Button onClick={handleImport} fullWidth size="sm" disabled={!url.trim() || saving}>
+          <Button onClick={handleImport} fullWidth size="sm" disabled={saving} className="cursor-pointer transition-colors duration-200">
             {saving ? "Importing..." : "Import"}
           </Button>
         </div>

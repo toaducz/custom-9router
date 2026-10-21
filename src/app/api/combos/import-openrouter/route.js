@@ -1,7 +1,10 @@
 import { NextResponse } from "next/server";
-import { createCombo } from "@/lib/localDb";
+import { createCombo, getComboByName } from "@/lib/localDb";
 
 export const dynamic = "force-dynamic";
+
+export const DEFAULT_OPENROUTER_URL =
+  "https://openrouter.ai/models?max_price=0&input_modalities=text&order=coding-high-to-low";
 
 // Never fetch the user-supplied URL (SSRF). Only parse its query as filters,
 // then fetch this fixed catalog endpoint.
@@ -21,7 +24,7 @@ function parseModalities(value) {
     .filter(Boolean);
 }
 
-function modelMatches(model, { maxPrice, outputModalities }) {
+function modelMatches(model, { maxPrice, outputModalities, inputModalities }) {
   if (maxPrice != null) {
     const prompt = Number(model?.pricing?.prompt);
     const completion = Number(model?.pricing?.completion);
@@ -33,17 +36,47 @@ function modelMatches(model, { maxPrice, outputModalities }) {
     const have = new Set(arch.map((m) => String(m).toLowerCase()));
     if (!outputModalities.every((m) => have.has(m))) return false;
   }
+  if (inputModalities.length > 0) {
+    const arch = model?.architecture?.input_modalities || model?.input_modalities || [];
+    const have = new Set(arch.map((m) => String(m).toLowerCase()));
+    if (!inputModalities.every((m) => have.has(m))) return false;
+  }
   return true;
 }
 
-// POST /api/combos/import-openrouter — { url } → create openrouter-{Date.now()} combo
+export function formatComboDate(d = new Date()) {
+  const pad = (n) => String(n).padStart(2, "0");
+  const year = d.getFullYear();
+  const month = pad(d.getMonth() + 1);
+  const day = pad(d.getDate());
+  return `${year}-${month}-${day}`;
+}
+
+async function getUniqueOpenRouterComboName(prefix = "openrouter") {
+  const dateStr = formatComboDate();
+  const baseName = `${prefix}-${dateStr}`;
+
+  const existing = await getComboByName(baseName);
+  if (!existing) {
+    return baseName;
+  }
+
+  let suffix = 2;
+  while (true) {
+    const candidate = `${baseName}-${suffix}`;
+    const found = await getComboByName(candidate);
+    if (!found) {
+      return candidate;
+    }
+    suffix++;
+  }
+}
+
+// POST /api/combos/import-openrouter — { url?, name? } → create openrouter-YYYY-MM-DD combo
 export async function POST(request) {
   try {
     const body = await request.json().catch(() => ({}));
-    const rawUrl = typeof body?.url === "string" ? body.url.trim() : "";
-    if (!rawUrl) {
-      return NextResponse.json({ error: "URL is required" }, { status: 400 });
-    }
+    const rawUrl = typeof body?.url === "string" && body.url.trim() ? body.url.trim() : DEFAULT_OPENROUTER_URL;
 
     let parsed;
     try {
@@ -65,8 +98,8 @@ export async function POST(request) {
       return NextResponse.json({ error: "max_price must be a number" }, { status: 400 });
     }
     const outputModalities = parseModalities(parsed.searchParams.get("output_modalities"));
-    // Note: order=most-popular is accepted but not re-sorted — /v1/models
-    // exposes no popularity rank, so upstream order is preserved.
+    const inputModalities = parseModalities(parsed.searchParams.get("input_modalities"));
+    const order = parsed.searchParams.get("order")?.toLowerCase();
 
     let res;
     try {
@@ -88,16 +121,50 @@ export async function POST(request) {
       return NextResponse.json({ error: "Unexpected OpenRouter catalog shape" }, { status: 502 });
     }
 
-    const models = list
-      .filter((m) => typeof m?.id === "string" && modelMatches(m, { maxPrice, outputModalities }))
-      .map((m) => `openrouter/${m.id}`);
+    let matchedList = list.filter(
+      (m) => typeof m?.id === "string" && modelMatches(m, { maxPrice, outputModalities, inputModalities })
+    );
+
+    if (order === "coding-high-to-low") {
+      matchedList.sort((a, b) => {
+        const scoreA = Number(a?.benchmarks?.artificial_analysis?.coding_index ?? -1);
+        const scoreB = Number(b?.benchmarks?.artificial_analysis?.coding_index ?? -1);
+        return scoreB - scoreA;
+      });
+    } else if (order === "intelligence-high-to-low") {
+      matchedList.sort((a, b) => {
+        const scoreA = Number(a?.benchmarks?.artificial_analysis?.intelligence_index ?? -1);
+        const scoreB = Number(b?.benchmarks?.artificial_analysis?.intelligence_index ?? -1);
+        return scoreB - scoreA;
+      });
+    }
+
+    const models = matchedList.map((m) => `openrouter/${m.id}`);
 
     if (models.length === 0) {
       return NextResponse.json({ error: "No models matched these filters" }, { status: 400 });
     }
 
+    const requestedName = typeof body?.name === "string" ? body.name.trim() : "";
+    let comboName = "";
+    if (requestedName) {
+      if (!/^[a-zA-Z0-9_.\-]+$/.test(requestedName)) {
+        return NextResponse.json(
+          { error: "Only letters, numbers, -, _ and . allowed in combo name" },
+          { status: 400 }
+        );
+      }
+      const existing = await getComboByName(requestedName);
+      if (existing) {
+        return NextResponse.json({ error: `Combo "${requestedName}" already exists` }, { status: 400 });
+      }
+      comboName = requestedName;
+    } else {
+      comboName = await getUniqueOpenRouterComboName();
+    }
+
     const combo = await createCombo({
-      name: `openrouter-${Date.now()}`,
+      name: comboName,
       models,
       kind: "llm",
     });
